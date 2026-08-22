@@ -2,7 +2,7 @@
 
 Aktivitas laboratorium membangun Keycloak dan PostgreSQL sebagai layanan IAM, kemudian menghubungkannya dengan aplikasi Flask melalui OpenID Connect Authorization Code Flow dan PKCE S256.
 
-> **Batas penggunaan.** Konfigurasi ini dirancang untuk laboratorium lokal pada satu laptop. Keycloak dijalankan dengan `start-dev` dan HTTP hanya pada antarmuka loopback. Mode tersebut tidak boleh dipindahkan langsung ke produksi. Deployment produksi memerlukan mode `start`, TLS, hostname publik yang tervalidasi, secret manager, backup, high availability, monitoring, dan prosedur upgrade.
+> **Batas penggunaan.** Konfigurasi ini dirancang untuk laboratorium lokal pada satu laptop. Keycloak dijalankan dengan `start-dev` dan HTTP hanya pada antarmuka loopback. Mode tersebut tidak boleh dipindahkan langsung ke lingkungan produksi. Deployment lingkungan produksi memerlukan mode `start`, TLS, hostname publik yang tervalidasi, secret manager, backup, high availability, monitoring, dan prosedur upgrade.
 
 ## Hasil Belajar
 
@@ -32,13 +32,13 @@ Trust boundary laboratorium terdiri atas browser, relying party, identity provid
 | --- | --- | --- |
 | Flask | `http://localhost:5000` | OIDC relying party dan enforcement RBAC |
 | Keycloak | `http://keycloak.localhost:8080` | Autentikasi, sesi SSO, penerbit token, dan role |
-| Management | `http://localhost:9000/health/ready` | Readiness lokal; jangan dipublikasikan pada produksi |
+| Management | `http://localhost:9000/health/ready` | Readiness lokal; jangan dipublikasikan pada lingkungan produksi |
 | PostgreSQL | `db:5432` pada `iam-net` | Penyimpanan state Keycloak tanpa port host |
 | Realm | `devsecops-lab` | Batas administrasi identitas laboratorium |
 
 ## Versi yang Digunakan
 
-Versi berikut dipin agar hasil praktikum dapat direproduksi. Versi ini diverifikasi pada 22 Agustus 2026; lakukan verifikasi ulang sebelum semester berikutnya.
+Versi berikut dipin agar hasil praktikum dapat direlingkungan produksi. Versi ini diverifikasi pada 22 Agustus 2026; lakukan verifikasi ulang sebelum semester berikutnya.
 
 | Komponen | Versi/tag | Catatan |
 | --- | --- | --- |
@@ -973,7 +973,7 @@ PS> Get-FileHash .\reports\* -Algorithm SHA256
 | --- | --- | --- | --- | --- |
 | IAM-01 | PostgreSQL tidak memiliki port host | `docker compose config` dan `docker compose ps` | Tidak ada mapping `5432` | Port database dipublikasikan |
 | IAM-02 | Keycloak dan app hanya pada loopback | Konfigurasi port efektif | Host IP `127.0.0.1` | Binding `0.0.0.0` atau seluruh interface |
-| IAM-03 | Realm dapat direproduksi | JSON valid dan log import | Realm `devsecops-lab` tersedia | Import gagal atau realm tidak tersedia |
+| IAM-03 | Realm dapat direlingkungan produksi | JSON valid dan log import | Realm `devsecops-lab` tersedia | Import gagal atau realm tidak tersedia |
 | IAM-04 | Redirect URI eksak | JSON realm dan negative test | URI penyerang ditolak HTTP 400 | Redirect tidak sah diterima |
 | IAM-05 | PKCE S256 diwajibkan | Atribut client dan negative test | Permintaan tanpa challenge ditolak | Login dapat dimulai tanpa PKCE |
 | IAM-06 | Direct Access Grant dimatikan | JSON client dan respons token endpoint | HTTP 400/401 | Password grant menghasilkan token |
@@ -999,7 +999,7 @@ PS> Get-FileHash .\reports\* -Algorithm SHA256
 | Role tidak muncul pada aplikasi | Scope `roles` atau scope mapping tidak aktif | Periksa claim tersanitasi dan JSON realm | Pastikan default scope `roles` dan `scopeMappings` berisi role aplikasi |
 | `/admin` memberi 200 kepada `mahasiswa1` | Role assignment salah atau decorator tidak diterapkan | Periksa profil dan kode endpoint | Hapus role admin dari user viewer; pastikan `@require_role("admin")` aktif |
 | Keycloak readiness 404 | Health belum aktif atau port manajemen salah | Periksa `KC_HEALTH_ENABLED` dan log | Gunakan image/konfigurasi terpin dan port 9000; rebuild bila build option berubah |
-| Aplikasi `unhealthy` saat awal start | Keycloak belum siap, tetapi app sudah hidup | `docker compose ps` dan log kedua service | Tunggu readiness; tambahkan retry pada integrasi produksi, jangan hanya mengandalkan startup order |
+| Aplikasi `unhealthy` saat awal start | Keycloak belum siap, tetapi app sudah hidup | `docker compose ps` dan log kedua service | Tunggu readiness; tambahkan retry pada integrasi lingkungan produksi, jangan hanya mengandalkan startup order |
 | Login otomatis terjadi setelah logout lokal | Sesi aplikasi terhapus, tetapi sesi SSO Keycloak masih aktif | Bandingkan `/logout` dengan `/logout-sso` | Gunakan RP-Initiated Logout bila tujuan pengguna adalah mengakhiri sesi SSO |
 | `Permission denied` saat PostgreSQL start | Capability atau ownership volume tidak memadai | Baca log entrypoint database | Pertahankan capability minimum yang diperlukan image; jangan memberi `privileged: true` |
 
@@ -1007,10 +1007,10 @@ PS> Get-FileHash .\reports\* -Algorithm SHA256
 
 1. **PKCE tidak menggantikan validasi redirect URI.** PKCE mengikat authorization code pada pembuat request, sedangkan redirect URI membatasi lokasi pengiriman respons. Keduanya menangani risiko berbeda dan harus diterapkan bersama.
 2. **JWT yang dapat didekode belum tentu valid.** Keputusan akses hanya boleh memakai claim dari token yang signature, issuer, audience, waktu berlaku, algoritma, state, dan nonce-nya telah diverifikasi.
-3. **RBAC harus ditegakkan di resource server.** Keycloak menerbitkan role, tetapi endpoint Flask tetap wajib memeriksa role pada setiap request. Menyembunyikan menu Admin pada antarmuka tidak merupakan kontrol otorisasi.
+3. **RBAC harus diterapkan di resource server.** Keycloak menerbitkan role, tetapi endpoint Flask tetap wajib memeriksa role pada setiap request. Menyembunyikan menu Admin pada antarmuka tidak merupakan kontrol otorisasi.
 4. **Logout memiliki beberapa lapisan.** Menghapus cookie aplikasi tidak otomatis menghapus sesi SSO atau mencabut access token yang telah diterbitkan. Token lokal umumnya tetap valid sampai expiry apabila tidak ada introspection atau mekanisme revocation tambahan.
-5. **Realm import bukan pengganti backup.** JSON realm mendukung reproducibility konfigurasi, sedangkan database menyimpan state yang lebih luas. Produksi memerlukan backup terenkripsi dan uji restore versi-kompatibel.
-6. **`start-dev` sengaja tidak aman untuk produksi.** Kemudahan HTTP dan startup dinamis sesuai untuk eksplorasi lokal, tetapi tidak memenuhi kontrol produksi.
+5. **Realm import bukan pengganti backup.** JSON realm mendukung reproducibility konfigurasi, sedangkan database menyimpan state yang lebih luas. lingkungan produksi memerlukan backup terenkripsi dan uji restore versi-kompatibel.
+6. **`start-dev` sengaja tidak aman untuk lingkungan produksi.** Kemudahan HTTP dan startup dinamis sesuai untuk eksplorasi lokal, tetapi tidak memenuhi kontrol lingkungan produksi.
 
 ## Catatan Windows dan Linux
 
@@ -1052,7 +1052,7 @@ File `.env` mengandung kredensial. Hapus melalui mekanisme aman yang tersedia pa
 3. Tambahkan user ke group `kelas-a`, petakan role melalui group, lalu bandingkan kemudahan audit dengan direct role assignment.
 4. Lakukan callback dengan nilai `state` acak. Catat status HTTP tanpa merekam token atau cookie.
 5. Ubah satu karakter pada ID Token di lingkungan pengujian terpisah dan jelaskan mengapa signature validation harus gagal. Jangan memasukkan token asli ke laporan.
-6. Rancang migrasi dari HTTP `start-dev` menuju deployment produksi dengan reverse proxy TLS, secret manager, backup, metrics, dan minimal dua instance.
+6. Rancang migrasi dari HTTP `start-dev` menuju deployment lingkungan produksi dengan reverse proxy TLS, secret manager, backup, metrics, dan minimal dua instance.
 7. Jelaskan risiko penggunaan wildcard redirect URI, `fullScopeAllowed`, Direct Access Grant, dan client secret bersama.
 8. Buat access review sederhana yang menampilkan user, group, direct role, inherited role, owner, waktu tinjau, serta keputusan retain/revoke.
 
