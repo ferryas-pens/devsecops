@@ -96,7 +96,7 @@ Secret scanning mencari pola kredensial seperti API key, token, password, atau p
 
 Menghapus secret dari commit terbaru tidak membatalkan paparan. Secret dapat tetap berada pada commit lama, cache CI, artefak, fork, log, atau salinan lokal. Respons pertama adalah menganggap secret telah diketahui pihak lain, kemudian mencabut atau merotasi kredensial, memeriksa log penggunaan, menilai dampak, dan baru setelah itu mempertimbangkan pembersihan riwayat sesuai prosedur organisasi [90]. Rewriting history dapat mengganggu kolaborator dan tidak menjamin seluruh salinan hilang. Oleh sebab itu, pencegahan melalui secret manager, pre-commit scan, least privilege, masa berlaku singkat, serta monitoring penggunaan lebih kuat daripada hanya mengandalkan pembersihan.
 
-Allowlist harus sempit, memiliki owner, alasan, scope, dan masa tinjau. Menambahkan pola luas seperti seluruh folder test dapat menyembunyikan secret nyata yang tidak sengaja ditempatkan di sana. Untuk buku dan laboratorium ini, hanya digunakan token sintetis yang telah dipublikasikan sebagai contoh dokumentasi. Mahasiswa tetap harus menandainya sebagai data uji, tidak menggunakannya untuk layanan nyata, dan menghapusnya setelah eksperimen.
+Allowlist harus sempit, memiliki owner, alasan, scope, dan masa tinjau. Menambahkan pola luas seperti seluruh folder test dapat menyembunyikan secret nyata yang tidak sengaja ditempatkan di sana. Allowlist bawaan scanner juga perlu dipahami: contoh key dari dokumentasi publik sering sengaja dikecualikan agar tidak menghasilkan false positive. Untuk buku dan laboratorium ini, digunakan token sintetis yang dibangkitkan lokal dengan prefix khusus dan dideteksi oleh rule kustom. Mahasiswa tetap harus menandainya sebagai data uji, tidak menggunakannya untuk layanan nyata, dan menghapusnya setelah eksperimen.
 
 ### Triage, Prioritas, dan Security Gate
 
@@ -140,7 +140,7 @@ Studi kasus berupa endpoint kalkulator pada Flask. Versi awal menggunakan eval t
 
 ### Langkah 1 - Membuat Aplikasi yang Sengaja Lemah
 
-```python
+```bash
 mkdir -p ~/devsecops-lab/ch12/{app,policy,tests,reports}
 cd ~/devsecops-lab/ch12
 cat > app/app.py <<'PY'
@@ -160,7 +160,7 @@ PY
 
 ### Langkah 2 - Menulis Negative Test
 
-```python
+```bash
 cat > tests/test_security.py <<'PY'
 import sys
 from pathlib import Path
@@ -170,28 +170,37 @@ from app import app
 
 def test_only_documented_addition_is_allowed():
     client = app.test_client()
-    response = client.get('/calculate?q=2**8')
+    response = client.get('/calculate', query_string={'q': '2**8'})
     assert response.status_code == 400
 
 def test_addition_works():
     client = app.test_client()
-    response = client.get('/calculate?q=2+3')
+    response = client.get('/calculate', query_string={'q': '2+3'})
     assert response.status_code == 200
     assert response.get_json()['result'] == 5
 PY
 
-python -m venv .venv
+python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install flask pytest
-pytest -q
+pytest -q tests/test_security.py | tee reports/pytest-before.txt
+echo "exit=${PIPESTATUS[0]}" | tee -a reports/pytest-before.txt
 ```
 
-Pada versi lemah, test pertama diharapkan gagal karena ekspresi 2**8 diterima dan dievaluasi, walaupun requirement hanya mengizinkan penjumlahan dua bilangan bulat. Kegagalan ini merupakan evidence bahwa perilaku aplikasi lebih luas daripada spesifikasi. Simpan output dan exit code tanpa menyembunyikan hasil gagal yang memang diharapkan pada baseline.
+Pada versi lemah, test pertama diharapkan gagal karena ekspresi 2**8 diterima dan dievaluasi, walaupun requirement hanya mengizinkan penjumlahan dua bilangan bulat. Test kedua lulus karena eval memang dapat menjumlahkan 2+3. Kegagalan test pertama merupakan evidence bahwa perilaku aplikasi lebih luas daripada spesifikasi. Simpan output dan exit code tanpa menyembunyikan hasil gagal yang memang diharapkan pada baseline.
+
+> **Catatan encoding URL: **Parameter dikirim melalui query_string, bukan ditulis langsung sebagai /calculate?q=2+3. Pada query string, karakter + didekode menjadi spasi, sehingga server akan menerima "2 3", bukan "2+3". Bila menguji dengan curl atau browser, tulis tanda tambah sebagai %2B, misalnya /calculate?q=2%2B3. Kesalahan encoding seperti ini dapat membuat test gagal karena alasan yang tidak berkaitan dengan kontrol keamanan yang sedang diuji.
 
 ### Langkah 3 - Membuat dan Menguji Rule Semgrep
 
-```python
+```bash
+# Pin ke versi/digest yang disetujui dosen; baris berikut merekam hasil resolusinya.
+SEMGREP_IMAGE=semgrep/semgrep:latest
+docker pull "$SEMGREP_IMAGE"
+docker image inspect "$SEMGREP_IMAGE" --format '{{index .RepoDigests 0}}' \
+  | tee reports/semgrep-image.txt
+
 cat > policy/flask-security.yml <<'YAML'
 rules:
   - id: flask-dangerous-eval
@@ -214,16 +223,20 @@ def expected(user_input):
     return int(user_input)
 PY
 
-docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep   semgrep --test --config policy/flask-security.yml tests/rule_test.py
+docker run --rm -v "$PWD:/src" -w /src "$SEMGREP_IMAGE" \
+  semgrep --test --config policy/flask-security.yml tests/rule_test.py
 
-docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep   semgrep scan --config policy/flask-security.yml app tests   --error --json --output reports/semgrep-before.json
+docker run --rm -v "$PWD:/src" -w /src "$SEMGREP_IMAGE" \
+  semgrep scan --config policy/flask-security.yml app \
+  --error --json --output reports/semgrep-before.json
+echo "exit=$?" | tee reports/semgrep-before-exit.txt
 ```
 
-Perintah --test memeriksa apakah rule menghasilkan finding pada contoh ruleid dan tidak menghasilkan finding pada contoh ok. Pemindaian aplikasi sebelum perbaikan harus menemukan penggunaan eval. Catat versi image atau digest, identifier rule, file dan baris, severity, exit code, serta hash commit. Jangan hanya menyalin jumlah finding.
+Perintah --test memeriksa apakah rule menghasilkan finding pada contoh ruleid dan tidak menghasilkan finding pada contoh ok. Pemindaian aplikasi hanya mencakup direktori app; fixture tests/rule_test.py sengaja berisi eval sehingga harus diuji melalui --test, bukan ikut dipindai sebagai kode aplikasi. Pemindaian sebelum perbaikan harus menemukan penggunaan eval, dan opsi --error membuat exit code bernilai 1 ketika finding ada. Catat versi image atau digest, identifier rule, file dan baris, severity, exit code, serta hash commit. Jangan hanya menyalin jumlah finding.
 
 ### Langkah 4 - Memperbaiki Kode dengan Allowlist Operasi
 
-```python
+```bash
 cat > app/app.py <<'PY'
 import operator
 from flask import Flask, jsonify, request
@@ -245,8 +258,13 @@ def calculate():
     return jsonify(result=ALLOWED[operation](left, right))
 PY
 
-pytest -q
-docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep   semgrep scan --config policy/flask-security.yml app tests   --error --json --output reports/semgrep-after.json
+pytest -q tests/test_security.py | tee reports/pytest-after.txt
+echo "exit=${PIPESTATUS[0]}" | tee -a reports/pytest-after.txt
+
+docker run --rm -v "$PWD:/src" -w /src "$SEMGREP_IMAGE" \
+  semgrep scan --config policy/flask-security.yml app \
+  --error --json --output reports/semgrep-after.json
+echo "exit=$?" | tee reports/semgrep-after-exit.txt
 ```
 
 Perbaikan menghapus evaluasi kode dinamis dan memetakan identifier operasi ke fungsi yang telah ditentukan. Test 2**8 harus menghasilkan HTTP 400, sedangkan 2+3 harus tetap menghasilkan 5. Semgrep setelah perbaikan tidak boleh lagi melaporkan flask-dangerous-eval pada aplikasi. Reviewer tetap perlu menilai nilai batas bilangan, format operator, error handling, dan requirement tambahan; hilangnya satu finding tidak membuktikan seluruh endpoint aman.
@@ -254,44 +272,92 @@ Perbaikan menghapus evaluasi kode dinamis dan memetakan identifier operasi ke fu
 ### Langkah 5 - Eksperimen Secret Scanning yang Aman
 
 ```bash
+# Pin ke versi/digest yang disetujui dosen; baris berikut merekam hasil resolusinya.
+GITLEAKS_IMAGE=zricethezav/gitleaks:latest
+docker pull "$GITLEAKS_IMAGE"
+docker image inspect "$GITLEAKS_IMAGE" --format '{{index .RepoDigests 0}}' \
+  | tee reports/gitleaks-image.txt
+
+# Rule kustom: tetap memakai seluruh rule bawaan, lalu menambah pola token lab.
+cat > policy/gitleaks.toml <<'TOML'
+[extend]
+useDefault = true
+
+[[rules]]
+id = "ch12-synthetic-token"
+description = "Token sintetis praktikum Bab 12"
+regex = '''ch12lab_[0-9a-f]{32}'''
+keywords = ["ch12lab_"]
+TOML
+
 git init
 git config user.name 'DevSecOps Lab'
 git config user.email 'lab@example.invalid'
-printf 'AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-' > app/.env.lab
+printf '.venv/\nreports/\n__pycache__/\n' > .gitignore
+git add .gitignore app tests policy
+git commit -m 'lab: baseline ch12'
+
+# Nilai dibangkitkan lokal, tidak terkait layanan apa pun.
+printf 'LAB_API_TOKEN=ch12lab_%s\n' "$(openssl rand -hex 16)" > app/.env.lab
 git add app/.env.lab
-git commit -m 'lab: add synthetic documentation token'
+git commit -m 'lab: add synthetic token'
 git rm app/.env.lab
-git commit -m 'lab: remove synthetic documentation token'
+git commit -m 'lab: remove synthetic token'
 
-docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:latest   git --redact --report-format json   --report-path reports/gitleaks-history.json
+docker run --rm -v "$PWD:/repo" -w /repo "$GITLEAKS_IMAGE" \
+  git --config /repo/policy/gitleaks.toml --redact \
+  --report-format json --report-path /repo/reports/gitleaks-history.json
+echo "exit=$?" | tee reports/gitleaks-history-exit.txt
 
-docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:latest   dir --redact --report-format json   --report-path reports/gitleaks-working-tree.json .
+docker run --rm -v "$PWD:/repo" -w /repo "$GITLEAKS_IMAGE" \
+  dir --config /repo/policy/gitleaks.toml --redact \
+  --report-format json --report-path /repo/reports/gitleaks-working-tree.json app
+echo "exit=$?" | tee reports/gitleaks-working-tree-exit.txt
 ```
 
-Nilai AKIAIOSFODNN7EXAMPLE adalah contoh sintetis yang telah lama digunakan pada dokumentasi publik dan tidak boleh diganti dengan key nyata. Pemindaian working tree sesudah file dihapus dapat lulus, sedangkan pemindaian riwayat Git seharusnya masih menemukan pola pada commit lama. Perbedaan ini menunjukkan bahwa penghapusan file tidak menghapus sejarah. Jika pola tidak terdeteksi, periksa versi alat, konfigurasi rule, scope, exit code, dan isi repository; jangan langsung menyimpulkan aman.
+Token praktikum dibangkitkan secara acak dengan prefix ch12lab_ sehingga jelas sintetis dan tidak dapat dipakai pada layanan nyata. Buku ini sengaja tidak memakai contoh key dokumentasi seperti AKIAIOSFODNN7EXAMPLE: konfigurasi bawaan Gitleaks mengecualikan pola AWS yang diakhiri EXAMPLE, sehingga contoh tersebut tidak terdeteksi dan eksperimen akan tampak "aman" padahal hanya terkena allowlist. Pemindaian working tree pada direktori app sesudah file dihapus seharusnya lulus dengan exit code 0, sedangkan pemindaian riwayat Git seharusnya menemukan rule ch12-synthetic-token pada commit lama dengan exit code 1. Perbedaan ini menunjukkan bahwa penghapusan file tidak menghapus sejarah. Jika pola tidak terdeteksi, periksa versi alat, path --config, konfigurasi rule, scope, exit code, dan isi repository; jangan langsung menyimpulkan aman.
+
+> **Batas allowlist bawaan: **Scanner menyertakan allowlist untuk mengurangi false positive dari contoh dokumentasi. Allowlist yang sama dapat menyembunyikan nilai uji. Saat merancang eksperimen deteksi, pastikan data uji tidak cocok dengan pengecualian bawaan, lalu buktikan dengan satu temuan positif sebelum menafsirkan hasil kosong.
 
 > **Respons secret nyata: **Cabut atau rotasi terlebih dahulu, periksa penggunaan, dokumentasikan insiden, lalu lakukan pembersihan riwayat melalui prosedur yang disetujui. Redaction laporan tidak membuat secret kembali aman.
 
 ### Langkah 6 - Menyusun Gate dan Evidence
 
-```python
+```bash
 python - <<'PY'
-import json
+import json, sys
 from pathlib import Path
 
-required = [
-    Path('reports/semgrep-before.json'),
-    Path('reports/semgrep-after.json'),
-    Path('reports/gitleaks-history.json'),
-    Path('reports/gitleaks-working-tree.json'),
-]
-missing = [str(path) for path in required if not path.exists()]
-assert not missing, f'evidence belum lengkap: {missing}'
-json.loads(Path('reports/semgrep-after.json').read_text())
-print('PASS: evidence tersedia dan JSON Semgrep dapat dibaca')
+def load(name):
+    path = Path('reports') / name
+    if not path.exists():
+        sys.exit(f'FAIL: evidence belum lengkap: {path}')
+    return json.loads(path.read_text())
+
+RULE_SAST = 'flask-dangerous-eval'
+RULE_SECRET = 'ch12-synthetic-token'
+
+def sast_hits(report):
+    return [r for r in report.get('results', []) if r.get('check_id', '').endswith(RULE_SAST)]
+
+def secret_hits(report):
+    return [r for r in (report or []) if r.get('RuleID') == RULE_SECRET]
+
+checks = {
+    'SAST sebelum perbaikan menemukan eval': len(sast_hits(load('semgrep-before.json'))) > 0,
+    'SAST sesudah perbaikan bersih pada app': len(sast_hits(load('semgrep-after.json'))) == 0,
+    'Riwayat Git memuat token sintetis': len(secret_hits(load('gitleaks-history.json'))) > 0,
+    'Working tree app bersih dari token sintetis': len(secret_hits(load('gitleaks-working-tree.json'))) == 0,
+}
+for name, ok in checks.items():
+    print(('PASS' if ok else 'FAIL') + ': ' + name)
+if not all(checks.values()):
+    sys.exit(1)
+print('PASS: seluruh gate evidence Bab 12 terpenuhi')
 PY
 ```
+
+Script membaca isi laporan, bukan hanya memastikan berkas ada. Ini penting karena berkas JSON kosong atau laporan yang hanya berisi temuan dari target lain dapat lolos bila gate hanya memeriksa keberadaan file. Semgrep dapat menambahkan prefix path pada check_id, sehingga pencocokan memakai akhiran identifier rule.
 
 Buat matriks traceability yang menghubungkan requirement, weakness atau rule, test, hasil, perbaikan, dan evidence. Gate akhir praktikum dinyatakan lulus apabila unit test dan negative test lulus, custom rule telah diuji, finding eval tidak ada pada kode perbaikan, laporan teredaksi tersedia, serta mahasiswa dapat menjelaskan mengapa pemindaian riwayat secret berbeda dari pemindaian working tree.
 
@@ -299,14 +365,14 @@ Buat matriks traceability yang menghubungkan requirement, weakness atau rule, te
 
 | ID | Pengujian | Kondisi PASS | Evidence |
 | --- | --- | --- | --- |
-| TEST-12-01 | Baseline negative test | Versi lemah gagal pada input 2**8. | Output pytest sebelum perbaikan. |
-| TEST-12-02 | Functional regression | 2+3 menghasilkan 5 setelah perbaikan. | Output pytest sesudah perbaikan. |
+| TEST-12-01 | Baseline negative test | Versi lemah gagal pada input 2**8. | pytest-before.txt beserta exit code. |
+| TEST-12-02 | Functional regression | 2+3 (dikirim melalui query_string atau %2B) menghasilkan 5 setelah perbaikan. | pytest-after.txt beserta exit code. |
 | TEST-12-03 | Input restriction | 2**8 dan format tidak sah menghasilkan HTTP 400. | Test report dan respons. |
 | TEST-12-04 | Semgrep rule test | Contoh ruleid dan ok sesuai ekspektasi. | Output semgrep --test. |
-| TEST-12-05 | SAST after fix | Tidak ada finding flask-dangerous-eval pada app. | semgrep-after.json. |
-| TEST-12-06 | Secret working tree | File sintetis yang dihapus tidak ada pada tree. | gitleaks-working-tree.json. |
-| TEST-12-07 | Secret history | Pola sintetis pada commit lama terdeteksi. | gitleaks-history.json teredaksi. |
-| TEST-12-08 | Evidence integrity | Semua laporan tersedia, terbaca, dan terkait commit. | Matriks traceability dan hash commit. |
+| TEST-12-05 | SAST after fix | Tidak ada finding flask-dangerous-eval pada direktori app. | semgrep-after.json dan exit code 0. |
+| TEST-12-06 | Secret working tree | Direktori app tidak memuat token sintetis. | gitleaks-working-tree.json dan exit code 0. |
+| TEST-12-07 | Secret history | Rule ch12-synthetic-token terdeteksi pada commit lama. | gitleaks-history.json teredaksi dan exit code 1. |
+| TEST-12-08 | Evidence integrity | Script Langkah 6 PASS; laporan terkait commit dan digest image alat. | Output script, hash commit, semgrep-image.txt, gitleaks-image.txt. |
 
 *Tabel 12.4. Skenario pengujian dan evidence Bab 12.*
 
@@ -336,11 +402,12 @@ Analisis keempat menilai kualitas gate. Gate yang memblokir semua temuan tanpa t
 | Gejala | Penyebab yang mungkin | Tindakan korektif |
 | --- | --- | --- |
 | pytest tidak menemukan modul app | Path proyek atau virtual environment salah. | Aktifkan .venv; jalankan dari root ch12; periksa sys.path test. |
+| Test 2+3 menghasilkan 400 atau 500 | Tanda + pada URL didekode menjadi spasi sehingga server menerima "2 3". | Kirim parameter melalui query_string atau tulis + sebagai %2B. |
 | Negative test langsung lulus pada baseline | Kode lemah sudah berubah atau test tidak memanggil endpoint yang benar. | Periksa app/app.py, route, input 2**8, dan status response. |
 | Semgrep rule tidak valid | Indentasi YAML atau field rule tidak lengkap. | Jalankan semgrep --validate/--test; periksa id, languages, message, severity, dan pattern. |
 | Semgrep tidak menemukan eval | Scope salah, file dikecualikan, atau rule tidak dimuat. | Tampilkan konfigurasi; scan app/app.py secara eksplisit; periksa exit code. |
-| Finding tetap ada setelah perbaikan | Fixture rule_test.py ikut dipindai atau artefak lama terbaca. | Pisahkan scope aplikasi dan test rule; baca lokasi finding sebelum mengubah allowlist. |
-| Gitleaks tidak menemukan token sintetis | Subcommand, versi, rule, atau history Git tidak sesuai. | Catat gitleaks version; periksa git log; jalankan mode git dan dir secara terpisah. |
+| Finding tetap ada setelah perbaikan | Fixture rule_test.py ikut dipindai atau artefak lama terbaca. | Pindai hanya direktori app; uji fixture melalui semgrep --test; baca lokasi finding sebelum mengubah allowlist. |
+| Gitleaks tidak menemukan token sintetis | Token cocok dengan allowlist bawaan (misalnya akhiran EXAMPLE), --config tidak terbaca, atau history Git tidak sesuai. | Gunakan token ch12lab_ dan rule kustom; periksa path --config; catat gitleaks version; periksa git log. |
 | Laporan JSON kosong atau tidak dibuat | Folder reports tidak ada, permission, atau proses berhenti lebih awal. | Buat folder; periksa mount, path, exit code, serta stdout/stderr. |
 | Pipeline membocorkan nilai secret | Output tidak diredaksi atau debug logging aktif. | Hentikan publikasi log; rotasi secret nyata; gunakan --redact dan masking CI. |
 | Terlalu banyak false positive | Rule terlalu umum atau scope terlalu luas. | Triage sampel; perbaiki rule; tambah negative fixture; gunakan pengecualian sempit. |
